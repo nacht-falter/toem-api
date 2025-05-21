@@ -1,0 +1,11 @@
+services:
+  toem-api:
+    build: .
+    container_name: toem-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
