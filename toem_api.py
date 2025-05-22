@@ -114,6 +114,22 @@ def get_music(
     return [{k: v for k, v in dict(row).items() if k != "user_id"} for row in rows]
 
 
+@app.get("/music/{rfid}")
+def get_music_item(
+    rfid: str,
+    user_id: str = Depends(verify_token)
+):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM music WHERE user_id = ? AND rfid = ?", (user_id, rfid))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return {k: v for k, v in dict(row).items() if k != "user_id"}
+    raise HTTPException(status_code=404, detail="Item not found")
+
+
 @app.post("/music/sync")
 def sync_music(
     items: List[MusicItem],
@@ -169,22 +185,6 @@ def upsert_music(
         "status": "updated" if exists else "inserted",
         "rfid": item.rfid
     }
-
-
-@app.get("/music/{rfid}")
-def get_music_item(
-    rfid: str,
-    user_id: str = Depends(verify_token)
-):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM music WHERE user_id = ? AND rfid = ?", (user_id, rfid))
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        return dict(row)
-    raise HTTPException(status_code=404, detail="Item not found")
 
 
 @app.delete("/music/{rfid}")
