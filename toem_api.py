@@ -76,7 +76,6 @@ def startup():
         user_id TEXT PRIMARY KEY,
         last_sync TIMESTAMP
     );
-
     """)
     cur.execute("""
         CREATE TRIGGER IF NOT EXISTS update_last_modified
@@ -111,7 +110,8 @@ def get_music(
         cur.execute("SELECT * FROM music WHERE user_id = ?", (user_id,))
     rows = cur.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    # Don't return user_id
+    return [{k: v for k, v in dict(row).items() if k != "user_id"} for row in rows]
 
 
 @app.post("/music/sync")
