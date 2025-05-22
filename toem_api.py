@@ -73,9 +73,10 @@ def startup():
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sync_meta (
-            id INTEGER PRIMARY KEY,
-            last_sync TIMESTAMP
-        );
+        user_id TEXT PRIMARY KEY,
+        last_sync TIMESTAMP
+    );
+
     """)
     cur.execute("""
         CREATE TRIGGER IF NOT EXISTS update_last_modified
@@ -129,6 +130,14 @@ def sync_music(
                 location = excluded.location,
                 title = excluded.title;
         """, (user_id, item.rfid, item.source, item.location, item.title))
+
+    cur.execute("""
+        INSERT INTO sync_meta (user_id, last_sync)
+        VALUES (?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            last_sync = CURRENT_TIMESTAMP;
+    """, (user_id,))
+
     conn.commit()
     conn.close()
     return {"status": "ok"}
