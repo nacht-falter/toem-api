@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -66,6 +68,11 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE token = ?", (token,))
     row = cur.fetchone()
+    if not row:
+        # Browser sessions map to the same user_id, so everything downstream is
+        # unchanged - they are just independently revocable.
+        cur.execute("SELECT user_id FROM sessions WHERE token = ?", (token,))
+        row = cur.fetchone()
     conn.close()
     if not row:
         raise HTTPException(
@@ -114,6 +121,25 @@ def startup():
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
             token TEXT NOT NULL
+        );
+    """)
+    # Password login for browsers. Added separately so existing token-only
+    # users keep working - a null hash simply means "cannot log in with a
+    # password", not "no password required".
+    columns = [row[1] for row in cur.execute("PRAGMA table_info(users)")]
+    if "password_hash" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
+    # Browser sessions are separate tokens for the *same* user, because all
+    # data is scoped by user_id: a second user would see a different, empty set
+    # of cards. Being separate rows, they can be revoked without touching the
+    # long-lived token the players use.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            label TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     conn.commit()
@@ -332,3 +358,126 @@ def spotify_search(
         }
         for album in albums
     ]
+
+
+# --- password login ---------------------------------------------------------
+
+# PBKDF2 via the standard library: no extra dependency, and adequate here. The
+# iteration count is stored with the hash so it can be raised later without
+# invalidating existing passwords.
+PBKDF2_ITERATIONS = 600_000
+# Failed logins are counted in memory per user. Enough to make guessing a
+# password over the network impractical; it resets when the process restarts,
+# which is acceptable for a single-instance personal service.
+_login_failures = {}
+MAX_LOGIN_FAILURES = 10
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        algorithm, iterations, salt_hex, digest_hex = stored.split("$")
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations))
+    except (ValueError, AttributeError):
+        return False
+    # Constant time: a timing difference here would leak the hash byte by byte.
+    return hmac.compare_digest(digest.hex(), digest_hex)
+
+
+# Precomputed once at import so the unknown-user path costs exactly one
+# verification, the same as a wrong password.
+_DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
+
+
+class LoginRequest(BaseModel):
+    user_id: str
+    password: str
+    label: Optional[str] = None
+
+
+class SetPasswordRequest(BaseModel):
+    user_id: str
+    password: str
+
+
+@app.post("/login")
+def login(request: LoginRequest):
+    """Exchange a password for a session token
+
+    Lets a browser sign in with something a password manager can fill, rather
+    than a long opaque token typed by hand. The session token is separate from
+    the user's long-lived token, so it can be revoked without reconfiguring
+    every player.
+    """
+    if _login_failures.get(request.user_id, 0) >= MAX_LOGIN_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Restart the service to reset.")
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash FROM users WHERE user_id = ?", (request.user_id,))
+    row = cur.fetchone()
+
+    # Verify against a fixed dummy hash when the user is unknown or has no
+    # password, so that case costs the same as a wrong password and the two
+    # cannot be told apart by timing. The dummy is precomputed: hashing one
+    # here would make the unknown-user path twice as slow, which is the same
+    # leak in the other direction.
+    stored = row["password_hash"] if row and row["password_hash"] else None
+    if stored:
+        ok = verify_password(request.password, stored)
+    else:
+        verify_password(request.password, _DUMMY_HASH)
+        ok = False
+
+    if not ok:
+        conn.close()
+        _login_failures[request.user_id] = _login_failures.get(request.user_id, 0) + 1
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid credentials")
+
+    _login_failures.pop(request.user_id, None)
+    session_token = secrets.token_urlsafe(32)
+    cur.execute("INSERT INTO sessions (token, user_id, label) VALUES (?, ?, ?)",
+                (session_token, request.user_id, request.label or "web"))
+    conn.commit()
+    conn.close()
+    return {"token": session_token, "user_id": request.user_id}
+
+
+@app.post("/logout")
+def logout(credentials: HTTPAuthorizationCredentials = Security(security)):
+    """Revoke the session token presented. A user token is left alone."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE token = ?", (credentials.credentials,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/users/password", dependencies=[Security(verify_admin_token)])
+def set_password(request: SetPasswordRequest):
+    """Set or change a user's password. Admin only."""
+    if len(request.password) < 12:
+        raise HTTPException(status_code=400,
+                            detail="Password must be at least 12 characters")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET password_hash = ? WHERE user_id = ?",
+                (hash_password(request.password), request.user_id))
+    if cur.rowcount == 0:
+        conn.close()
+        raise HTTPException(status_code=404, detail="No such user")
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "user_id": request.user_id}
