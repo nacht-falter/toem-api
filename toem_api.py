@@ -366,11 +366,26 @@ def spotify_search(
 # iteration count is stored with the hash so it can be raised later without
 # invalidating existing passwords.
 PBKDF2_ITERATIONS = 600_000
-# Failed logins are counted in memory per user. Enough to make guessing a
-# password over the network impractical; it resets when the process restarts,
-# which is acceptable for a single-instance personal service.
+# Failed logins are counted per user, within a moving time window. The window
+# matters: an unbounded counter that only cleared on a *successful* login was a
+# denial of service, because the check runs before verification - ten wrong
+# guesses locked the account out until the process restarted, and anyone who
+# knew a username could do it deliberately.
 _login_failures = {}
 MAX_LOGIN_FAILURES = 10
+LOGIN_FAILURE_WINDOW = 900  # seconds
+
+
+def _recent_failures(user_id):
+    """Failure timestamps still inside the window, pruning anything older."""
+    now = time.time()
+    recent = [t for t in _login_failures.get(user_id, ())
+              if now - t < LOGIN_FAILURE_WINDOW]
+    if recent:
+        _login_failures[user_id] = recent
+    else:
+        _login_failures.pop(user_id, None)
+    return recent
 
 
 def hash_password(password: str) -> str:
@@ -417,10 +432,13 @@ def login(request: LoginRequest):
     the user's long-lived token, so it can be revoked without reconfiguring
     every player.
     """
-    if _login_failures.get(request.user_id, 0) >= MAX_LOGIN_FAILURES:
+    recent = _recent_failures(request.user_id)
+    if len(recent) >= MAX_LOGIN_FAILURES:
+        retry_in = int(LOGIN_FAILURE_WINDOW - (time.time() - recent[0])) + 1
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed attempts. Restart the service to reset.")
+            detail=f"Too many failed attempts. Try again in {retry_in}s.",
+            headers={"Retry-After": str(retry_in)})
 
     conn = get_db()
     cur = conn.cursor()
@@ -441,7 +459,7 @@ def login(request: LoginRequest):
 
     if not ok:
         conn.close()
-        _login_failures[request.user_id] = _login_failures.get(request.user_id, 0) + 1
+        _login_failures.setdefault(request.user_id, []).append(time.time())
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid credentials")
 
