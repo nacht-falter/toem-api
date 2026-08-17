@@ -32,9 +32,8 @@ All `.env` files, their `.bak-*` copies and both SQLite databases are now `600` 
 API host, toem2 and the dev machine. Both services run as root, so nothing lost access;
 verified by restarting the player and re-checking the API afterwards.
 
-The `.bak-*` files still exist and still contain real secrets, including the pre-rotation
-Spotify refresh token — now owner-only, but worth deleting once there is no reason to
-keep them.
+The `.bak-*` copies were shredded on 2026-08-17 after confirming every live `.env` was
+intact. Nothing now holds the pre-rotation Spotify refresh token.
 
 ## 5. No HSTS on the API
 
