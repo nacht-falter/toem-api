@@ -26,15 +26,15 @@ surfaces it. Revoking one device currently means direct DB access. Wants
 `/users/add` mints a token, `/users/password` sets a password separately. Fine for three
 users, awkward beyond that. Could accept an optional password on `/users/add`.
 
-## 4. Credential files are world-readable
+## 4. Credential files are world-readable — DONE 2026-08-17
 
-`.env` is 644/664 and the SQLite databases are 644, on all three machines — any local
-account can read the API tokens, and on the API host the password hashes and every
-session token. Single-user boxes, so low risk, but `chmod 600` costs nothing.
+All `.env` files, their `.bak-*` copies and both SQLite databases are now `600` on the
+API host, toem2 and the dev machine. Both services run as root, so nothing lost access;
+verified by restarting the player and re-checking the API afterwards.
 
-Note the `.env.bak-*` files created on 2026-08-17 (toem2 and the VPS) have the same
-permissions and contain real secrets, including the pre-rotation Spotify refresh token.
-Either tighten or delete them.
+The `.bak-*` files still exist and still contain real secrets, including the pre-rotation
+Spotify refresh token — now owner-only, but worth deleting once there is no reason to
+keep them.
 
 ## 5. No HSTS on the API
 
