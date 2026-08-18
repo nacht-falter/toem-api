@@ -358,9 +358,16 @@ def spotify_playlist(
         f"https://api.spotify.com/v1/playlists/{playlist_id}",
         params={"fields": "name"}, headers=headers, timeout=10)
     if meta.status_code == 404:
+        # Spotify answers 404 rather than 403 for a playlist the caller may
+        # not see, so "missing" and "private" are indistinguishable here. This
+        # server holds app-only credentials, which see public playlists only,
+        # and a private playlist is much the likelier cause of the two.
         raise HTTPException(
             status_code=404,
-            detail="No such playlist, or it is not public")
+            detail="Could not read that playlist. It must be public: this "
+                   "server can only see public playlists, and so can any "
+                   "player using a different Spotify account. Set the "
+                   "playlist to public in Spotify and try again.")
     if meta.status_code != 200:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
