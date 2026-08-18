@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -311,6 +312,96 @@ def spotify_app_token():
     _spotify_token["value"] = payload["access_token"]
     _spotify_token["expires_at"] = time.time() + payload.get("expires_in", 3600) - 60
     return _spotify_token["value"]
+
+
+PLAYLIST_URL_RE = re.compile(
+    r"open\.spotify\.com/(?:intl-[a-z]{2}/)?playlist/([A-Za-z0-9]+)")
+
+
+def playlist_id_from(text):
+    """The playlist id in a Spotify link or URI, or None
+
+    Mirrors normalize_spotify_location in the player's register_rfid.py, so
+    the same things a user can paste there work here too.
+    """
+    text = (text or "").strip()
+    match = PLAYLIST_URL_RE.search(text)
+    if match:
+        return match.group(1)
+    parts = text.split(":")
+    if len(parts) >= 3 and parts[0] == "spotify" and parts[1] == "playlist":
+        return parts[2]
+    return None
+
+
+@app.get("/spotify/playlist")
+def spotify_playlist(
+    url: str,
+    user_id: str = Depends(verify_token),
+):
+    """Resolve a playlist into the episodes a series card would play
+
+    A series card points at a playlist of whole albums, one per episode. The
+    grouping here - runs of consecutive tracks sharing an album - must match
+    SpotifySeriesPlayer._fetch_episodes in the player, so what is shown before
+    saving is what the device will actually play.
+    """
+    playlist_id = playlist_id_from(url)
+    if not playlist_id:
+        raise HTTPException(
+            status_code=400,
+            detail="That is not a Spotify playlist link")
+
+    headers = {"Authorization": "Bearer " + spotify_app_token()}
+
+    meta = requests.get(
+        f"https://api.spotify.com/v1/playlists/{playlist_id}",
+        params={"fields": "name"}, headers=headers, timeout=10)
+    if meta.status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail="No such playlist, or it is not public")
+    if meta.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Spotify rejected the playlist lookup: HTTP {meta.status_code}")
+
+    episodes = []
+    params = {"limit": 50, "offset": 0, "market": SPOTIFY_MARKET}
+    while True:
+        page = requests.get(
+            f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+            params=params, headers=headers, timeout=10)
+        if page.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Reading the playlist failed: HTTP {page.status_code}")
+        body = page.json()
+
+        for entry in body.get("items", []):
+            album = ((entry.get("track") or {}).get("album") or {})
+            uri = album.get("uri")
+            if not uri:
+                # Removed tracks, local files and podcast episodes.
+                continue
+            if not episodes or episodes[-1]["uri"] != uri:
+                episodes.append({
+                    "uri": uri,
+                    "name": album.get("name"),
+                    "image": (album.get("images") or [{}])[-1].get("url"),
+                    "tracks": 0,
+                })
+            episodes[-1]["tracks"] += 1
+
+        if not body.get("next"):
+            break
+        params["offset"] += params["limit"]
+
+    return {
+        "uri": f"spotify:playlist:{playlist_id}",
+        "name": meta.json().get("name"),
+        "episodes": episodes,
+    }
 
 
 @app.get("/spotify/search")
